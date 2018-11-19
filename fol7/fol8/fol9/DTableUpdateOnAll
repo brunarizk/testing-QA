@@ -1,0 +1,234 @@
+
+var START_STATE = "start"
+var log = require("log");
+//
+// Define Finite State Machine framework
+//
+function SimpleStateMachine(machineName, id) {
+	if(machineName){
+		this.storage = this.loadStorage(id);	
+		log.debug("SM constructor for [" + machineName + "]");
+	}
+
+
+}
+SimpleStateMachine.prototype.getId = function (){
+	return this.storage.id;
+}
+
+SimpleStateMachine.prototype.generateId = function(length){
+   	var random = "";	
+   	var source = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+	var numberOfCharacters = source.length;
+   	for( var i=0; i < length; i++ )
+       	random += source.charAt(Math.floor(Math.random() * 100 % numberOfCharacters));
+   	return random;
+}
+
+SimpleStateMachine.prototype.inspect = function () {
+	return JSON.stringify(this.storage);
+}	
+					
+SimpleStateMachine.prototype.event = function (name) {
+  	
+	var state = this.transitions[this.storage.state]
+	var transition = state[name];
+	if(transition){
+	      	log.debug("found transition [" + name + "]");
+			var branch = transition["branch"];
+	      	var code = transition["code"];
+	       	if(code && branch){
+			log.debug('attempting transition: ' + 
+				this.storage.state + ' -> ' + name)              
+        	if(code.call(this)){
+	            	//  If transition succeeds
+	            	log.debug('successfully set state set to: ' + name)
+	                // change state
+	                this.storage.state = branch
+			//fields should have been updated by the user directly
+	                this.persistStorage(this.storage.id)
+                    
+		}else{
+			log.debug("transition failed by user code");
+	        }
+	} else {
+		log.debug('transition failed, state: ' + this.storage.state)
+	} 
+	} else {
+		log.debug("transition '" + name + "' doesn't exist!")
+	}
+}						
+
+SimpleStateMachine.prototype.loadStorage = function (id, storageModel) {
+	log.debug("loading storage for [" + id + "]")
+	//based on the model copy from local storage or from GetDocument
+    if(storageModel == "simple"){
+		if(!id){
+	    	//generate new random id
+	        id = this.generateId(10);
+	        storage.global[id] = {};
+	        storage.global[id].state = "start";
+	        storage.global[id].fields = ""; //will not be persisted if it remains empty
+      	}
+
+		var fields = null;
+      	if(storage.global[id]["fields"]){
+        	fields = JSON.parse(storage.global[id]["fields"]);
+      	}else{
+			fields = {};
+      	}	
+      	//instance storage
+      	this.storage = {
+        	// mandatory fields 
+          	id: id,
+          	state: storage.global[id].state,
+          	fields: fields
+      	}      
+    }else{
+    	
+		this.storage = {
+				fields: {
+	      
+			}
+		}
+		if(id){
+          this.storage.id = id;
+          this.transaction = apsdb.beginTransaction();
+          
+          var response = apsdb.callApi("Query", {"apsdb.query":"apsdb.documentKey=\""+this.storage.id+"\"", "apsdb.lock": "true", "apsdb.queryFields":"*"}, null);
+          log.debug(JSON.stringify(response));
+          if(response.metadata.status == "success"){
+              if(response.result.documents.length == 1){
+                  this.storage.isNew = false;
+                  //load fields into this.storage.fields
+                  this.document = response.result.documents[0];
+                  for(var key in this.document){
+                      //exclude all fields starting with apsdb along with "state", "key" and "versionNumber"
+                      if(String.match(key, /^apsdb\./) == null && key != "key" && key != "state" && key != "versionNumber"){
+                          log.debug("setting " + key)
+                          this.storage.fields[key] = this.document[key];
+                      }
+                      this.storage.state = this.document.state;
+                  }
+                	log.debug("loaded document from db" + JSON.stringify(this.document));
+              }else{
+                  this.storage.isNew = true;
+                  this.storage.state = "start";
+				  this.document = {
+                  	"apsdb.documentKey": id
+                  }
+              }	
+          }else{
+              //complete failure, return an error
+              return JSON.stringify({"errorCode": "SCRIPT_ERROR", "errorDetail":"failed to load machine from storage"});
+          }
+      }else{
+          this.storage.id = this.generateId(10);
+          this.storage.isNew = true;
+          this.storage.state = "start";
+        this.document = {
+        	"apsdb.documentKey": this.storage.id
+        }
+      }
+      
+};
+	
+	
+	return this.storage;
+}
+SimpleStateMachine.prototype.persistStorage = function (id, storageModel) {
+  	log.debug("persisting changes")
+   	//based on the model copy to local storage or call SaveDocument
+  	if(storageModel == "simple"){
+		storage.global[id] = {};
+  		storage.global[id] = {
+			state: this.storage.state,
+      		fields: JSON.stringify(this.storage.fields)
+    	}      
+    }else{
+      	
+		//we need to save the machine stoarge in a document in the db. 
+      	//document is already loaded but use a new one anyway
+      	this.newDocument = {}
+      	this.newDocument.state = this.storage.state;
+      	//was this a new document or was it loaded from the db?
+        this.newDocument["apsdb.update"] = "" + !this.storage.isNew;
+        this.newDocument["apsdb.documentKey"] = this.storage.id;
+      	//the rest are fields, copy them all
+      	for(var key in this.storage.fields){
+			var value = this.storage.fields[key];
+          	if(!value instanceof Array &&  typeof value !== "string"){
+            	value = JSON.stringify(value);
+            }
+        	this.newDocument[key] = value;
+        }
+      	//also remove anything that the user didn't pass in again (or removed)
+      	for(var key in this.document){
+        	if(String.match(key, /^apsdb\./) == null && key != "key" && key != "state" && key != "versionNumber"){
+            	if(typeof this.storage.fields[key] === "undefined"){
+                	//this was in storage and got removed, remove it from the document
+                  	this.newDocument[key + ".apsdb.delete"] = "";//
+                }
+            }
+        }
+      	log.debug(JSON.stringify(this.newDocument));
+      	log.debug(JSON.stringify(apsdb.callApi("SaveDocument", this.newDocument, null)));
+      	if(this.transaction) {//no transaction is started for new documents
+        	this.transaction.commit();  
+        }
+      
+    }
+
+}
+// Publishing StateMachine constructor
+var StateMachineImpl = function(id) {
+	// Call ancestor constructor
+  	SimpleStateMachine.call (this, "default", id)
+}
+
+StateMachineImpl.prototype = new SimpleStateMachine()
+StateMachineImpl.prototype.constructor = StateMachineImpl
+
+// Define states and transitions
+StateMachineImpl.prototype.transitions = {
+	"start" : {
+			"begin" : {
+					"code": function() {return true;},
+					"branch": "new_1"
+					
+			}
+		},
+	"new_1" : {
+			"event_1" : {
+					"code": function() {return true;},
+					"branch": "new_2"
+					
+			}
+		},
+	"new_2" : {
+		}
+}
+
+
+//main
+var parameters;
+if(request.body){
+  	log.error("got body")
+	parameters = request.body;
+}else{
+  	log.error("no body")
+	parameters = request.parameters;
+}
+
+var event = parameters.event;//get the required event
+var id = parameters.id; //could be null, this will be handled by the SimpleStateMachine code
+var loglevel = parameters.loglevel;
+if(loglevel){
+	log.setLevel(loglevel);
+}
+
+var ssmi = new StateMachineImpl(id);
+if(event){
+  ssmi.event(event);
+}
+return ssmi.inspect();
