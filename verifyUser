@@ -1,0 +1,6 @@
+var userId = "doudou";
+var password = "doudou";
+
+var result = require("user").verifyCredentials(userId, password);
+
+return result;

@@ -1,0 +1,8 @@
+totalVotes = 0;
+
+function upVote(){
+    
+    this.totalVotes++;
+}
+
+return totalVotes;
