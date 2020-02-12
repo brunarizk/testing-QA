@@ -1,0 +1,6 @@
+var deviceId = "dada";
+var password = "dada";
+
+var result = require("device").verifyCredentials(deviceId, password);
+
+return result;
